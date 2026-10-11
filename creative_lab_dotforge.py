@@ -91,7 +91,39 @@ def _write_png(path, rows_u8):
 # 位置采集
 # ----------------------------------------------------------------------------
 
-def gather_positions(obj, source, use_eval):
+def _dedup_points(points, tol):
+    """按世界坐标去重：距离 <= tol 的视为同一个点。
+    用空间哈希 + 相邻 27 格回查，避免刚好落在格边界时漏判。"""
+    if tol <= 0.0:
+        return points
+    cells = {}
+    out = []
+    for p in points:
+        cx = int(math.floor(p.x / tol))
+        cy = int(math.floor(p.y / tol))
+        cz = int(math.floor(p.z / tol))
+        dup = False
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    for q in cells.get((cx + dx, cy + dy, cz + dz), ()):
+                        if (abs(q.x - p.x) <= tol and abs(q.y - p.y) <= tol
+                                and abs(q.z - p.z) <= tol):
+                            dup = True
+                            break
+                    if dup:
+                        break
+                if dup:
+                    break
+            if dup:
+                break
+        if not dup:
+            cells.setdefault((cx, cy, cz), []).append(p)
+            out.append(p)
+    return out
+
+
+def gather_positions(obj, source, use_eval, dedup_vertices=True, dedup_tol=0.0001):
     """返回世界坐标下的位置列表 (list[Vector])。"""
     dg = None
     tmp_obj = None
@@ -109,6 +141,23 @@ def gather_positions(obj, source, use_eval):
         if source == 'VERTEX':
             for v in me.vertices:
                 pts.append(M @ v.co)
+            if dedup_vertices:
+                n0 = len(pts)
+                pts = _dedup_points(pts, dedup_tol)
+                print("[DotForge] 顶点去重：%d -> %d（容差 %g m）" % (n0, len(pts), dedup_tol))
+        elif source == 'QUAD':
+            # 先把三角面合并回四边面(等价 Blender 的 Tris to Quads)，再取每个四边面的中心
+            bm = bmesh.new()
+            bm.from_mesh(me)
+            bmesh.ops.join_triangles(
+                bm, faces=bm.faces[:],
+                cmp_seam=False, cmp_sharp=False, cmp_uvs=False, cmp_materials=False,
+                angle_face_threshold=math.pi, angle_shape_threshold=math.pi)
+            nq = sum(1 for f in bm.faces if len(f.verts) == 4)
+            for f in bm.faces:
+                pts.append(M @ f.calc_center_median())
+            print("[DotForge] 四边面中心：合并后 %d 个面（其中四边面 %d）" % (len(bm.faces), nq))
+            bm.free()
         elif source == 'FACE':
             for p in me.polygons:
                 pts.append(M @ p.center)
@@ -146,8 +195,9 @@ def gather_positions(obj, source, use_eval):
 # ----------------------------------------------------------------------------
 
 def bake_position_map(obj, source, use_eval, scale, out_dir, prefix,
-                      square_tex, do_norm_png, do_csv, do_layout):
-    pts = gather_positions(obj, source, use_eval)
+                      square_tex, do_norm_png, do_csv, do_layout,
+                      dedup_vertices=True, dedup_tol=0.0001):
+    pts = gather_positions(obj, source, use_eval, dedup_vertices, dedup_tol)
     n = len(pts)
     if n == 0:
         raise RuntimeError("没有采到任何位置（对象为空？）")
@@ -223,13 +273,16 @@ def bake_position_map(obj, source, use_eval, scale, out_dir, prefix,
         files.append(csv_path)
 
     # --- info.json ---
-    src_label = {'ISLAND': '网格孤岛中心', 'FACE': '面(Polygon)中心', 'VERTEX': '顶点'}[source]
+    src_label = {'QUAD': '四边面(quad)中心', 'ISLAND': '网格孤岛中心',
+                 'FACE': '面(Polygon)中心', 'VERTEX': '顶点'}[source]
     info = {
         "generated_by": "CreativeLab · DotForge",
         "source_object": obj.name,
         "position_source": source,
         "position_definition": "%s，对象矩阵变换到世界坐标后 x%g" % (src_label, scale),
         "use_evaluated_mesh": bool(use_eval),
+        "vertex_dedup": {"enabled": bool(dedup_vertices and source == 'VERTEX'),
+                         "tolerance_m": dedup_tol},
         "position_count": n,
         "texture": {"width": W, "height": H,
                     "index_to_uv": "u=(i%W+0.5)/W, v=(i//W+0.5)/H (V 自图片顶部向下)"},
@@ -261,14 +314,21 @@ class DotForgeSettings(PropertyGroup):
     position_source: EnumProperty(
         name="位置来源",
         items=[
+            ('QUAD', "四边面中心", "每个四边面(quad)的中心；三角面会自动合并回四边面(等价 Tris to Quads)"),
             ('ISLAND', "网格孤岛中心", "每个独立网格块(如每颗 LED 灯珠)算一个位置"),
-            ('FACE', "面中心", "每个 Polygon 的中心"),
+            ('FACE', "面中心", "每个 Polygon 的中心（不做三角面合并）"),
             ('VERTEX', "顶点", "每个顶点"),
         ],
-        default='ISLAND')
+        default='QUAD')
     use_eval: BoolProperty(
         name="应用修改器", default=True,
         description="使用求值后的网格(含几何节点/修改器结果)")
+    dedup_vertices: BoolProperty(
+        name="顶点去重", default=True,
+        description="顶点模式下按世界坐标去重，合并重合顶点(如 UV 缝合/锐边拆分出的重复顶点)")
+    dedup_tolerance: FloatProperty(
+        name="去重容差 (m)", default=0.0001, min=0.0, precision=6,
+        description="世界坐标距离不超过该值的顶点视为同一个")
     unit_scale: FloatProperty(
         name="单位缩放", default=100.0, min=0.0001,
         description="世界坐标 -> 贴图单位的倍数。UE 用 cm，所以 = 100")
@@ -302,7 +362,8 @@ class CREATIVELAB_OT_bake_posmap(Operator):
         try:
             r = bake_position_map(obj, s.position_source, s.use_eval,
                                   s.unit_scale, out_dir, prefix,
-                                  s.square_tex, s.do_norm_png, s.do_csv, s.do_layout)
+                                  s.square_tex, s.do_norm_png, s.do_csv, s.do_layout,
+                                  s.dedup_vertices, s.dedup_tolerance)
         except Exception as e:
             self.report({'ERROR'}, "烘焙失败：%s" % e)
             return {'CANCELLED'}
@@ -347,6 +408,10 @@ class CREATIVELAB_PT_dotforge(Panel):
         box.label(text="位置来源", icon='MESH_DATA')
         box.prop(s, "position_source", text="")
         box.prop(s, "use_eval")
+        if s.position_source == 'VERTEX':
+            box.prop(s, "dedup_vertices")
+            if s.dedup_vertices:
+                box.prop(s, "dedup_tolerance")
 
         box = layout.box()
         box.label(text="输出", icon='IMAGE_DATA')

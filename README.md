@@ -8,10 +8,11 @@
 
 ## Features / 功能
 
-- 三种位置来源：
+- 四种位置来源：
+  - **Quad Face Center（四边面中心，默认）** —— 每个四边面的中心；三角面会自动合并回四边面（等价 Blender 的 Tris to Quads）
   - **Mesh Island Center（网格孤岛中心）** —— 每个独立网格块算一个位置（如每颗 LED 灯珠）
-  - **Face Center（面中心）** —— 每个 Polygon 中心
-  - **Vertex（顶点）** —— 每个顶点
+  - **Face Center（面中心）** —— 每个 Polygon 的中心（不做三角面合并）
+  - **Vertex（顶点）** —— 每个顶点，可按世界坐标**去重**（合并 UV 缝合 / 锐边拆分出的重合顶点，容差可调）
 - 可选使用**求值后的网格**（应用几何节点 / 修改器结果）
 - **32-bit float 无损 EXR**（`compression = NONE`，纹素 RGB = 世界坐标，A = 1）
 - 附带归一化 PNG、CSV、布局校验图、info.json
